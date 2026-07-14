@@ -45,3 +45,40 @@ export interface PeerHandle {
 // Fixed capture + encode + packetize + de-jitter + decode + playout delay that
 // no getStats field reports; the acoustic rig's offset C corrects the residual.
 export const DEVICE_CONST_MS = 40;
+
+/** A fresh, all-pending link record stamped at detection time. */
+export function newLinkRecord(index: number, nowMs: number): LinkMetric {
+    return {
+        index, detectedMs: nowMs, connectedMs: -1, setupMs: -1, failed: false,
+        candidateType: "", rttMs: -1, latRawMs: -1, latCalMs: -1, glare: 0,
+    };
+}
+
+/**
+ * Whether a (re-)detection of `index` should start a fresh record. A still-
+ * pending record keeps its original detection stamp; only a settled one — one
+ * that connected or failed — is replaced when the index is reused after teardown.
+ */
+export function shouldRedetect(prev: LinkMetric | undefined): boolean {
+    return prev == null || prev.connectedMs >= 0 || prev.failed;
+}
+
+/**
+ * Fold a connectionState transition into a link record: the first 'connected'
+ * stamps the setup time, and failed/closed before ever connecting counts against
+ * ICE success. A transient failure that later recovers is cleared.
+ */
+export function applyState(rec: LinkMetric, state: string, nowMs: number): void {
+    if (state === "connected" && rec.connectedMs < 0) {
+        rec.connectedMs = nowMs;
+        rec.setupMs = Math.round(nowMs - rec.detectedMs);
+        rec.failed = false;
+    } else if ((state === "failed" || state === "closed") && rec.connectedMs < 0) {
+        rec.failed = true;
+    }
+}
+
+/** Rewrite one link's calibrated latency once the rig supplies the offset C. */
+export function applyCalibration(rec: LinkMetric, c: number): void {
+    if (rec.latRawMs >= 0) { rec.latCalMs = Math.round(rec.latRawMs + c); }
+}
