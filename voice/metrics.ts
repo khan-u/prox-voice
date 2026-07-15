@@ -82,3 +82,71 @@ export function applyState(rec: LinkMetric, state: string, nowMs: number): void 
 export function applyCalibration(rec: LinkMetric, c: number): void {
     if (rec.latRawMs >= 0) { rec.latCalMs = Math.round(rec.latRawMs + c); }
 }
+
+/** prflx (peer-reflexive) is a NAT-learned srflx for reporting purposes. */
+export function normalizeCandidate(t: string): string {
+    return t === "prflx" ? "srflx" : t;
+}
+
+/**
+ * Recent-average jitter-buffer delay in ms from the cumulative getStats
+ * counters. jitterBufferDelay is total seconds summed per emitted sample and
+ * jitterBufferEmittedCount is that sample count, so the delta between two reads
+ * gives the recent average; the first read falls back to the lifetime mean.
+ * Returns -1 when the counters are not yet populated.
+ */
+export function jitterBufferAvgMs(
+    prev: { delay: number; count: number } | undefined,
+    delay: number, count: number,
+): number {
+    if (delay < 0 || count <= 0) { return -1; }
+    if (prev != null && count > prev.count && delay >= prev.delay) {
+        return ((delay - prev.delay) / (count - prev.count)) * 1000;
+    }
+    return (delay / count) * 1000;
+}
+
+/** The Eq. (1) software mouth-to-ear estimate: RTT/2 + jitter buffer + C. */
+export function m2eEstimate(rttSeconds: number, jbAvgMs: number): number {
+    return Math.round((rttSeconds * 1000) / 2 + jbAvgMs + DEVICE_CONST_MS);
+}
+
+/** Nearest-rank percentile of a numeric sample; -1 for an empty sample. */
+export function percentile(xs: number[], p: number): number {
+    if (xs.length === 0) { return -1; }
+    const sorted = [...xs].sort((a, b) => a - b);
+    const rank = Math.ceil((p / 100) * sorted.length) - 1;
+    return Math.round(sorted[Math.min(sorted.length - 1, Math.max(0, rank))]);
+}
+
+/** Roll the per-link records into the session summary the harness reads. */
+export function summarizeKpis(all: LinkMetric[], calibrated: boolean): KpiSummary {
+    const connected = all.filter((m) => m.connectedMs >= 0);
+    const failed = all.filter((m) => m.failed && m.connectedMs < 0);
+    const attempts = connected.length + failed.length;
+
+    const setups = connected.map((m) => m.setupMs).filter((v) => v >= 0);
+    const typed = connected.filter((m) => m.candidateType !== "");
+    const relay = typed.filter((m) => m.candidateType === "relay");
+    const latRaw = connected.map((m) => m.latRawMs).filter((v) => v >= 0);
+    const latCal = connected.map((m) => m.latCalMs).filter((v) => v >= 0);
+
+    return {
+        links: connected.length,
+        iceAttempts: attempts,
+        iceSuccessPct: attempts > 0 ? Math.round((connected.length * 100) / attempts) : -1,
+        setupMedianMs: percentile(setups, 50),
+        setupP95Ms: percentile(setups, 95),
+        relayPct: typed.length > 0 ? Math.round((relay.length * 100) / typed.length) : -1,
+        candidateMix: {
+            host: typed.filter((m) => m.candidateType === "host").length,
+            srflx: typed.filter((m) => m.candidateType === "srflx").length,
+            relay: relay.length,
+        },
+        latRawMedianMs: percentile(latRaw, 50),
+        latRawP95Ms: percentile(latRaw, 95),
+        latCalMedianMs: calibrated ? percentile(latCal, 50) : -1,
+        latCalP95Ms: calibrated ? percentile(latCal, 95) : -1,
+        glareTotal: all.reduce((sum, m) => sum + m.glare, 0),
+    };
+}
