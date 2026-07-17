@@ -76,3 +76,54 @@ export function lossPct(lost: number, received: number): number {
 export function upKbps(bytesDelta: number, msDelta: number): number {
     return msDelta > 0 && bytesDelta >= 0 ? Math.round((bytesDelta * 8) / msDelta) : -1;
 }
+
+/** Share of samples the event-driven layer declined to report (0..100). */
+export function suppressedPct(samples: number, suppressed: number): number {
+    return samples > 0 ? Math.round((suppressed * 100) / samples) : 0;
+}
+
+/**
+ * Decide whether a periodic sample is a significant event, judged against what
+ * the sink *last heard* (not the previous sample) — exactly how suppression
+ * works in a real node. Returns the event kind + note, or null to suppress.
+ */
+export function detectEvent(
+    links: LinkReading[],
+    lastReportedLinks: Map<number, LinkReading>,
+    pos: NodePosition | null,
+    lastPos: NodePosition | null,
+): { kind: string; note: string } | null {
+    // Movement: straight-line tiles since the last *reported* position.
+    if (pos != null && lastPos != null) {
+        const dx = pos.x - lastPos.x, dy = pos.y - lastPos.y;
+        if (dx * dx + dy * dy >= MOVE_TILES * MOVE_TILES) {
+            return { kind: "move", note: "moved " + Math.round(Math.hypot(dx, dy)) + " tiles" };
+        }
+    } else if (pos != null && lastPos == null) {
+        return { kind: "move", note: "first position fix" };
+    }
+
+    // Topology: the neighbour set the sink knows no longer matches reality.
+    if (links.length !== lastReportedLinks.size) {
+        return { kind: "topology", note: lastReportedLinks.size + " → " + links.length + " neighbors" };
+    }
+
+    // Link quality: a state change, or a significant RTT / loss shift.
+    for (const cur of links) {
+        const ref = lastReportedLinks.get(cur.index);
+        if (ref == null) { return { kind: "topology", note: "peer " + cur.index + " replaced a neighbor" }; }
+        if (cur.state !== ref.state) {
+            return { kind: "link", note: "peer " + cur.index + " " + ref.state + " → " + cur.state };
+        }
+        if (cur.rttMs >= 0 && ref.rttMs >= 0) {
+            const delta = Math.abs(cur.rttMs - ref.rttMs);
+            if (delta >= RTT_DELTA_MIN_MS && delta >= ref.rttMs * RTT_DELTA_FRAC) {
+                return { kind: "link", note: "peer " + cur.index + " RTT " + ref.rttMs + " → " + cur.rttMs + " ms" };
+            }
+        }
+        if (cur.lossPct >= 0 && ref.lossPct >= 0 && cur.lossPct - ref.lossPct >= LOSS_DELTA_PCT) {
+            return { kind: "link", note: "peer " + cur.index + " loss " + ref.lossPct + " → " + cur.lossPct + "%" };
+        }
+    }
+    return null;
+}

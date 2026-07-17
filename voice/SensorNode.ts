@@ -12,17 +12,24 @@
  * only while the mesh is up. The pure event/energy logic lives in ./sensing.
  */
 import {
-    PeerEntry, LinkReading, SenseReport,
-    SAMPLE_MS, energyLevel, energySource, lossPct, upKbps,
+    PeerEntry, NodePosition, LinkReading, SenseReport,
+    SAMPLE_MS, HEARTBEAT_MS, MAX_REPORTS,
+    energyLevel, energySource, lossPct, upKbps, suppressedPct, detectEvent,
 } from "./sensing";
 
 export class SensorNode {
     private static peersProvider: (() => PeerEntry[]) | null = null;
+    private static positionProvider: (() => NodePosition | null) | null = null;
     private static timer: ReturnType<typeof setInterval> | null = null;
     private static sampling = false;            // getStats in flight — skip the tick
     private static reports: SenseReport[] = [];
     private static samples = 0;
     private static suppressed = 0;
+    private static lastReportAt = 0;
+    private static lastKind = "";
+    // Deltas are judged against what the sink last *heard*, not the last sample.
+    private static lastReportedPos: NodePosition | null = null;
+    private static lastReportedLinks: Map<number, LinkReading> = new Map();
     // Per-peer byte counters for uplink bitrate (previous sample, not reported).
     private static lastBytes: Map<number, { bytes: number; t: number }> = new Map();
     // Most recent sample's readings — feeds the election cost metric between reports.
@@ -39,11 +46,15 @@ export class SensorNode {
         SensorNode.peersProvider = provider;
     }
 
+    static wirePosition(provider: () => NodePosition | null): void {
+        SensorNode.positionProvider = provider;
+    }
+
     // ── duty cycle (driven by VoiceRTC alongside the radio) ───────────────────
 
     static start(): void {
         if (SensorNode.timer != null || typeof window === "undefined") { return; }
-        SensorNode.timer = setInterval(() => void SensorNode.sample(), SAMPLE_MS);
+        SensorNode.timer = setInterval(() => void SensorNode.sample("periodic"), SAMPLE_MS);
         SensorNode.hookBattery();
         (window as any).wsnSense = {
             stats: () => SensorNode.statsSnapshot(),
@@ -58,6 +69,12 @@ export class SensorNode {
         if (SensorNode.timer == null) { return; }
         clearInterval(SensorNode.timer);
         SensorNode.timer = null;
+        // Flush the session's tail, then reset the delta bases so a restarted
+        // node re-announces its state on the first event.
+        SensorNode.emit("node-sleep", [], "sampler stopped with mesh teardown");
+        SensorNode.lastReportedPos = null;
+        SensorNode.lastReportedLinks = new Map();
+        SensorNode.lastBytes = new Map();
     }
 
     static isRunning(): boolean {
@@ -97,18 +114,69 @@ export class SensorNode {
         return n > 0 ? Math.round(sum / n) : -1;
     }
 
+    // ── pushed events (precise edges beat the 2 s sampler) ────────────────────
+
+    /** VAD edge from VoiceRTC — the acoustic sensing modality. */
+    static recordVad(active: boolean): void {
+        if (SensorNode.timer != null) { void SensorNode.sample(active ? "speech-start" : "speech-stop"); }
+    }
+
+    /** Link-state transition from VoiceRTC's onconnectionstatechange. */
+    static recordLinkState(index: number, state: string): void {
+        if (SensorNode.timer != null) { void SensorNode.sample("link", "peer " + index + " → " + state); }
+    }
+
+    /** Cluster-protocol event (election result, relay on/off) → forced report. */
+    static recordCluster(note: string): void {
+        if (SensorNode.timer != null) { void SensorNode.sample("cluster", note); }
+    }
+
     // ── the sampler ───────────────────────────────────────────────────────────
-    private static async sample(): Promise<void> {
+
+    /**
+     * Take one sample and decide whether it becomes a report. Pushed edges pass a
+     * forced kind and always report; a periodic sample reports only when an event
+     * threshold trips or the heartbeat is due, and otherwise is suppressed.
+     */
+    private static async sample(forcedKind: string, note?: string): Promise<void> {
         if (SensorNode.sampling) { return; }
         SensorNode.sampling = true;
         try {
             SensorNode.samples++;
-            await SensorNode.readLinks();
+            const links = await SensorNode.readLinks();
+            if (forcedKind !== "periodic") {
+                SensorNode.emit(forcedKind, links, note ?? "");
+                return;
+            }
+            const pos = SensorNode.positionProvider ? SensorNode.positionProvider() : null;
+            const event = detectEvent(links, SensorNode.lastReportedLinks, pos, SensorNode.lastReportedPos);
+            if (event != null) {
+                SensorNode.emit(event.kind, links, event.note);
+            } else if (Date.now() - SensorNode.lastReportAt >= HEARTBEAT_MS) {
+                SensorNode.emit("heartbeat", links, "");
+            } else {
+                SensorNode.suppressed++;   // DTX: not significant enough to report
+            }
         } catch {
             // A closing peer connection can reject getStats mid-teardown; drop it.
         } finally {
             SensorNode.sampling = false;
         }
+    }
+
+    /** Commit a report to the sink ring and advance the delta bases. */
+    private static emit(kind: string, links: LinkReading[], note: string): void {
+        const pos = SensorNode.positionProvider ? SensorNode.positionProvider() : null;
+        const report: SenseReport = {
+            t: Date.now(), kind, pos, neighbors: links.length, links,
+            energy: Math.round(SensorNode.energyLevel() * 100) / 100, note,
+        };
+        SensorNode.reports.push(report);
+        if (SensorNode.reports.length > MAX_REPORTS) { SensorNode.reports.shift(); }
+        SensorNode.lastReportAt = report.t;
+        SensorNode.lastKind = kind;
+        SensorNode.lastReportedPos = pos;
+        SensorNode.lastReportedLinks = new Map(links.map((l) => [l.index, l]));
     }
 
     /** Read every neighbour's link-quality modality from getStats. */
@@ -163,12 +231,19 @@ export class SensorNode {
     // ── sink access ───────────────────────────────────────────────────────────
 
     static statsSnapshot(): { samples: number; reports: number; suppressedPct: number } {
-        const total = SensorNode.samples;
         return {
-            samples: total,
+            samples: SensorNode.samples,
             reports: SensorNode.reports.length,
-            suppressedPct: total > 0 ? Math.round((SensorNode.suppressed * 100) / total) : 0,
+            suppressedPct: suppressedPct(SensorNode.samples, SensorNode.suppressed),
         };
+    }
+
+    /** One-line digest for the live telemetry panel; "" while asleep. */
+    static summaryLine(): string {
+        if (SensorNode.timer == null) { return ""; }
+        const s = SensorNode.statsSnapshot();
+        const last = SensorNode.lastKind !== "" ? " · last: " + SensorNode.lastKind : "";
+        return "sense: " + s.reports + " rpt / " + s.samples + " smp (" + s.suppressedPct + "% dtx)" + last;
     }
 
     /** Download the sink buffer as JSON — the experiment data-collection path. */
