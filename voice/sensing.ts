@@ -65,3 +65,14 @@ export function energySource(forced: number | null, battery: number | null): str
     if (battery != null) { return "battery"; }
     return "virtual";
 }
+
+/** Cumulative inbound loss as a one-decimal percentage; -1 when nothing arrived. */
+export function lossPct(lost: number, received: number): number {
+    const total = received + lost;
+    return total > 0 ? Math.round((lost * 1000) / total) / 10 : -1;
+}
+
+/** Uplink bitrate from a byte/time delta. bits/ms == kbit/s; -1 if undefined. */
+export function upKbps(bytesDelta: number, msDelta: number): number {
+    return msDelta > 0 && bytesDelta >= 0 ? Math.round((bytesDelta * 8) / msDelta) : -1;
+}

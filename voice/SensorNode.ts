@@ -12,15 +12,21 @@
  * only while the mesh is up. The pure event/energy logic lives in ./sensing.
  */
 import {
-    SenseReport, SAMPLE_MS, energyLevel, energySource,
+    PeerEntry, LinkReading, SenseReport,
+    SAMPLE_MS, energyLevel, energySource, lossPct, upKbps,
 } from "./sensing";
 
 export class SensorNode {
+    private static peersProvider: (() => PeerEntry[]) | null = null;
     private static timer: ReturnType<typeof setInterval> | null = null;
     private static sampling = false;            // getStats in flight — skip the tick
     private static reports: SenseReport[] = [];
     private static samples = 0;
     private static suppressed = 0;
+    // Per-peer byte counters for uplink bitrate (previous sample, not reported).
+    private static lastBytes: Map<number, { bytes: number; t: number }> = new Map();
+    // Most recent sample's readings — feeds the election cost metric between reports.
+    private static lastSampleLinks: LinkReading[] = [];
 
     // ── energy modality (HEED's primary parameter) ────────────────────────────
     // Priority: forced (experiments) > real battery > virtual byte budget.
@@ -28,6 +34,10 @@ export class SensorNode {
     private static batteryLevel: number | null = null;
     private static batteryHooked = false;
     private static totalBytesSent = 0;
+
+    static wirePeers(provider: () => PeerEntry[]): void {
+        SensorNode.peersProvider = provider;
+    }
 
     // ── duty cycle (driven by VoiceRTC alongside the radio) ───────────────────
 
@@ -77,17 +87,77 @@ export class SensorNode {
         return energySource(SensorNode.energyForced, SensorNode.batteryLevel);
     }
 
+    /** Mean RTT across current links (ms) — the election's cost metric (HEED's
+     *  AMRP stand-in). -1 when no link has reported RTT yet. */
+    static avgLinkRttMs(): number {
+        let sum = 0, n = 0;
+        for (const r of SensorNode.lastSampleLinks) {
+            if (r.rttMs >= 0) { sum += r.rttMs; n++; }
+        }
+        return n > 0 ? Math.round(sum / n) : -1;
+    }
+
     // ── the sampler ───────────────────────────────────────────────────────────
     private static async sample(): Promise<void> {
         if (SensorNode.sampling) { return; }
         SensorNode.sampling = true;
         try {
             SensorNode.samples++;
+            await SensorNode.readLinks();
         } catch {
             // A closing peer connection can reject getStats mid-teardown; drop it.
         } finally {
             SensorNode.sampling = false;
         }
+    }
+
+    /** Read every neighbour's link-quality modality from getStats. */
+    private static async readLinks(): Promise<LinkReading[]> {
+        const peers = SensorNode.peersProvider ? SensorNode.peersProvider() : [];
+        const out: LinkReading[] = [];
+        const seen = new Set<number>();
+        for (const entry of peers) {
+            seen.add(entry.index);
+            const reading: LinkReading = {
+                index: entry.index, state: entry.pc.connectionState,
+                rttMs: -1, jitterMs: -1, lossPct: -1, upKbps: -1,
+            };
+            try {
+                const stats = await entry.pc.getStats();
+                let lost = 0, received = 0, bytesSent = 0;
+                stats.forEach((s: any) => {
+                    if (s.type === "candidate-pair" && s.state === "succeeded" &&
+                        (s.nominated === true || s.selected === true) &&
+                        typeof s.currentRoundTripTime === "number") {
+                        reading.rttMs = Math.round(s.currentRoundTripTime * 1000);
+                    }
+                    if (s.type === "inbound-rtp" && s.kind === "audio") {
+                        if (typeof s.jitter === "number") { reading.jitterMs = Math.round(s.jitter * 1000); }
+                        if (typeof s.packetsLost === "number") { lost = s.packetsLost; }
+                        if (typeof s.packetsReceived === "number") { received = s.packetsReceived; }
+                    }
+                    if (s.type === "outbound-rtp" && s.kind === "audio" &&
+                        typeof s.bytesSent === "number") {
+                        bytesSent = s.bytesSent;
+                    }
+                });
+                reading.lossPct = lossPct(lost, received);
+                const now = Date.now();
+                const prev = SensorNode.lastBytes.get(entry.index);
+                if (prev != null && bytesSent >= prev.bytes) {
+                    reading.upKbps = upKbps(bytesSent - prev.bytes, now - prev.t);
+                    SensorNode.totalBytesSent += bytesSent - prev.bytes;   // virtual energy debit
+                }
+                SensorNode.lastBytes.set(entry.index, { bytes: bytesSent, t: now });
+            } catch { /* closed mid-sample — keep the state-only reading */ }
+            out.push(reading);
+        }
+        // Forget byte counters for departed peers so a reused index starts clean.
+        for (const idx of SensorNode.lastBytes.keys()) {
+            if (!seen.has(idx)) { SensorNode.lastBytes.delete(idx); }
+        }
+        SensorNode.lastSampleLinks = out;
+        return out;
     }
 
     // ── sink access ───────────────────────────────────────────────────────────
