@@ -19,6 +19,7 @@
 import { DebugFlags } from "../DebugFlags";
 import { VoiceMetrics } from "./VoiceMetrics";
 import { SensorNode } from "./SensorNode";
+import { shouldIgnoreOffer } from "./glare";
 
 /** Sends one signalling blob to a target player via the server gateway. */
 export type RtcSignalSender = (targetIndex: number, json: string) => void;
@@ -54,6 +55,26 @@ export class VoiceRTC {
     // utterances (event-driven transmission). Set via ?wsndtx=1 or setDtx(true).
     private dtxOn: boolean = readParam("wsndtx") === "1";
 
+    private localStream: MediaStream | null = null;
+    private gettingStream: Promise<MediaStream | null> | null = null;
+    private micMuted = false;
+    // In-flight ensurePeer() promises, keyed by index, so the proximity tick and
+    // an inbound offer share one promise and exactly one connection is created.
+    private ensuring: Map<number, Promise<Peer | null>> = new Map();
+
+    // STUN discovers each node's server-reflexive candidate; TURN is the
+    // multi-hop store-and-forward fallback for symmetric-NAT pairs. The live
+    // config (short-lived TURN creds) is fetched once from /api/turn, so the
+    // secret token never ships in the client and any failure keeps STUN.
+    private static ICE: RTCConfiguration = {
+        iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun.cloudflare.com:3478" },
+        ],
+    };
+    private static iceFetched = false;
+    private static iceFetching: Promise<void> | null = null;
+
     private constructor(sendSignal: RtcSignalSender) {
         this.sendSignal = sendSignal;
         // High-entropy tie-break for glare resolution; not security-sensitive.
@@ -77,6 +98,7 @@ export class VoiceRTC {
         }
         const rtc = new VoiceRTC(sendSignal);
         VoiceRTC.instance = rtc;
+        void VoiceRTC.ensureIce();   // warm the TURN credentials before the first neighbour
 
         // Instrumentation is duty-cycled with the mesh and reads only getStats /
         // lifecycle edges, never the negotiation path.
@@ -96,6 +118,8 @@ export class VoiceRTC {
                 setDtx: (on: boolean) => { rtc.dtxOn = !!on; },
                 dtx: () => rtc.dtxOn,
                 audioLatency: () => measureAudioLatency(),
+                rxAudio: () => rtc.rxAudio(),
+                linkDebug: () => rtc.linkDebug(),
             };
         }
         rtc.dbg("init (nonce=" + rtc.nonce + ", voice OFF by default)");
@@ -105,6 +129,223 @@ export class VoiceRTC {
     static get(): VoiceRTC | null { return VoiceRTC.instance; }
 
     private dbg(...a: any[]): void { if ((DebugFlags as any).voice) { console.info("[rtc]", ...a); } }
+
+    /** Pull the live ICE config (TURN creds) from /api/turn once, replacing the
+     *  STUN-only default. Best-effort: any failure keeps the STUN fallback. */
+    private static ensureIce(): Promise<void> {
+        if (VoiceRTC.iceFetched) { return Promise.resolve(); }
+        if (VoiceRTC.iceFetching) { return VoiceRTC.iceFetching; }
+        VoiceRTC.iceFetching = (async () => {
+            try {
+                const res = await fetch("/api/turn", { cache: "no-store" });
+                const j = await res.json();
+                if (j && Array.isArray(j.iceServers) && j.iceServers.length > 0) {
+                    // Forced-relay routes every link through TURN even when a direct
+                    // path exists, to isolate the relay hop's cost.
+                    let forceRelay = !!(window as any).wsnForceRelay;
+                    if (readParam("wsnforcerelay") === "1") { forceRelay = true; }
+                    VoiceRTC.ICE = { iceServers: j.iceServers, iceTransportPolicy: forceRelay ? "relay" : "all" };
+                }
+            } catch { /* keep STUN fallback */ }
+            finally { VoiceRTC.iceFetched = true; VoiceRTC.iceFetching = null; }
+        })();
+        return VoiceRTC.iceFetching;
+    }
+
+    // ── mic: one capture, fanned to every peer (the node's radio) ─────────────
+
+    private async getLocalStream(): Promise<MediaStream | null> {
+        if (this.localStream) { return this.localStream; }
+        if (this.gettingStream) { return this.gettingStream; }
+        this.gettingStream = (async () => {
+            try {
+                const s = await navigator.mediaDevices.getUserMedia({
+                    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                    video: false,
+                });
+                this.localStream = s;
+                this.applyMuteState();
+                this.dbg("local mic acquired");
+                return s;
+            } catch (e) {
+                console.error("[rtc] getUserMedia failed", e);
+                return null;
+            } finally { this.gettingStream = null; }
+        })();
+        return this.gettingStream;
+    }
+
+    setMuted(muted: boolean): void { this.micMuted = muted; this.applyMuteState(); }
+    isMuted(): boolean { return this.micMuted; }
+
+    private applyMuteState(): void {
+        if (this.localStream) {
+            for (const t of this.localStream.getAudioTracks()) { t.enabled = !this.micMuted; }
+        }
+    }
+
+    // ── peer creation ──────────────────────────────────────────────────────────
+
+    /** Get-or-create the peer for `index`, deduped across concurrent callers. */
+    private ensurePeer(index: number): Promise<Peer | null> {
+        const existing = this.peers.get(index);
+        if (existing) { return Promise.resolve(existing); }
+        const inflight = this.ensuring.get(index);
+        if (inflight) { return inflight; }
+        const p = this.createPeer(index).finally(() => this.ensuring.delete(index));
+        this.ensuring.set(index, p);
+        return p;
+    }
+
+    private async createPeer(index: number): Promise<Peer | null> {
+        const existing = this.peers.get(index);
+        if (existing) { return existing; }
+        const stream = await this.getLocalStream();
+        if (!stream) { return null; }
+        await VoiceRTC.ensureIce();   // live TURN creds (STUN fallback if unavailable)
+
+        const pc = new RTCPeerConnection(VoiceRTC.ICE);
+        const peer: Peer = {
+            index, pc, audioEl: null, makingOffer: false, ignoreOffer: false,
+            remoteNonce: -1, remoteSet: false, pendingIce: [], bornMs: Date.now(),
+            everConnected: false, iceRestarted: false, graceUntil: 0,
+        };
+        this.peers.set(index, peer);
+
+        for (const track of stream.getAudioTracks()) { pc.addTrack(track, stream); }
+
+        pc.onicecandidate = (ev) => {
+            if (ev.candidate) { this.sendSignal(index, JSON.stringify({ k: "ice", cand: ev.candidate.toJSON() })); }
+        };
+        pc.ontrack = (ev) => {
+            this.dbg("remote track from", index);
+            this.attachRemoteAudio(peer, ev.streams[0] || new MediaStream([ev.track]));
+        };
+        pc.onnegotiationneeded = async () => { try { await this.makeOffer(peer); } catch (e) { this.dbg("negneeded err", e); } };
+        pc.onconnectionstatechange = () => {
+            const st = pc.connectionState;
+            this.dbg("peer", index, "state:", st);
+            VoiceMetrics.markState(index, st);      // setup-time / ICE-success record
+            SensorNode.recordLinkState(index, st);  // precise link-event edge
+            if (st === "connected") { peer.everConnected = true; }
+            if (st === "failed" || st === "closed") { this.closePeer(index, false); }
+        };
+        return peer;
+    }
+
+    private async makeOffer(peer: Peer): Promise<void> {
+        try {
+            peer.makingOffer = true;
+            await peer.pc.setLocalDescription();   // implicit createOffer
+            this.sendSignal(peer.index, JSON.stringify({ k: "offer", sdp: peer.pc.localDescription, nonce: this.nonce }));
+            this.dbg("→ offer to", peer.index);
+        } catch (e) {
+            this.dbg("makeOffer failed", e);
+        } finally { peer.makingOffer = false; }
+    }
+
+    private attachRemoteAudio(peer: Peer, stream: MediaStream): void {
+        if (!peer.audioEl) {
+            const el = document.createElement("audio");
+            el.autoplay = true;
+            (el as any).playsInline = true;   // iOS: stay inline
+            el.style.display = "none";
+            document.body.appendChild(el);
+            peer.audioEl = el;
+        }
+        peer.audioEl.srcObject = stream;
+        const p = peer.audioEl.play();
+        if (p && (p as any).catch) { (p as Promise<void>).catch(() => {}); }
+    }
+
+    // ── inbound signalling (perfect negotiation) ─────────────────────────────
+
+    async onSignal(fromIndex: number, json: string): Promise<void> {
+        if (!this.enabled) { return; }
+        let msg: any;
+        try { msg = JSON.parse(json); } catch { return; }
+        if (msg.k === "bye") { this.closePeer(fromIndex, false); return; }
+
+        const peer = await this.ensurePeer(fromIndex);
+        if (!peer) { return; }
+
+        try {
+            if (msg.k === "offer" || msg.k === "answer") {
+                if (typeof msg.nonce === "number") { peer.remoteNonce = msg.nonce >>> 0; }
+                if (msg.k === "offer") {
+                    peer.ignoreOffer = shouldIgnoreOffer(this.nonce, peer.remoteNonce, peer.makingOffer, peer.pc.signalingState);
+                    if (peer.ignoreOffer) { VoiceMetrics.markGlare(fromIndex); this.dbg("glare with", fromIndex, "→ ignore (impolite)"); return; }
+                    // setRemoteDescription does an implicit rollback when polite and
+                    // in have-local-offer (modern WebRTC).
+                    await peer.pc.setRemoteDescription(msg.sdp);
+                    peer.remoteSet = true;
+                    await this.flushIce(peer);
+                    await peer.pc.setLocalDescription();   // implicit createAnswer
+                    this.sendSignal(fromIndex, JSON.stringify({ k: "answer", sdp: peer.pc.localDescription, nonce: this.nonce }));
+                    this.dbg("→ answer to", fromIndex);
+                } else {
+                    await peer.pc.setRemoteDescription(msg.sdp);
+                    peer.remoteSet = true;
+                    await this.flushIce(peer);
+                }
+            } else if (msg.k === "ice" && msg.cand) {
+                if (peer.remoteSet) {
+                    try { await peer.pc.addIceCandidate(msg.cand); }
+                    catch (e) { if (!peer.ignoreOffer) { this.dbg("addIce err", e); } }
+                } else {
+                    peer.pendingIce.push(msg.cand);
+                }
+            }
+        } catch (e) { this.dbg("onSignal error from", fromIndex, e); }
+    }
+
+    private async flushIce(peer: Peer): Promise<void> {
+        const buffered = peer.pendingIce; peer.pendingIce = [];
+        for (const c of buffered) { try { await peer.pc.addIceCandidate(c); } catch (e) { this.dbg("flushIce err", e); } }
+    }
+
+    // ── harness probes over the live peers (read-only) ────────────────────────
+
+    /** Total inbound audio packets + emitted samples + loudest level across
+     *  peers — the packet-arrival signal the audio-gap/grace drivers key on. */
+    private async rxAudio(): Promise<{ pkts: number; samples: number; level: number }> {
+        let pkts = 0, samples = 0, level = 0;
+        for (const peer of this.peers.values()) {
+            try {
+                const stats = await peer.pc.getStats();
+                stats.forEach((s: any) => {
+                    if (s.type === "inbound-rtp" && s.kind === "audio") {
+                        if (typeof s.packetsReceived === "number") { pkts += s.packetsReceived; }
+                        if (typeof s.jitterBufferEmittedCount === "number") { samples += s.jitterBufferEmittedCount; }
+                        if (typeof s.audioLevel === "number") { level = Math.max(level, s.audioLevel); }
+                    }
+                });
+            } catch { /* pc closing — skip */ }
+        }
+        return { pkts, samples, level };
+    }
+
+    /** Per-peer connection forensics: distinguishes a never-connected wedge from
+     *  a connected-but-silent one without guessing from sample counts. */
+    private async linkDebug(): Promise<any[]> {
+        const out: any[] = [];
+        for (const peer of this.peers.values()) {
+            const d: any = {
+                index: peer.index, conn: peer.pc.connectionState, sig: peer.pc.signalingState,
+                ice: peer.pc.iceConnectionState, makingOffer: peer.makingOffer,
+                everConnected: peer.everConnected, outBytes: -1, inPkts: -1,
+            };
+            try {
+                const stats = await peer.pc.getStats();
+                stats.forEach((s: any) => {
+                    if (s.type === "outbound-rtp" && s.kind === "audio" && typeof s.bytesSent === "number") { d.outBytes = s.bytesSent; }
+                    if (s.type === "inbound-rtp" && s.kind === "audio" && typeof s.packetsReceived === "number") { d.inPkts = s.packetsReceived; }
+                });
+            } catch { /* pc closing */ }
+            out.push(d);
+        }
+        return out;
+    }
 
     // ── controls ──────────────────────────────────────────────────────────────
 
