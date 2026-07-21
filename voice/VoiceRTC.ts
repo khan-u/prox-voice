@@ -20,6 +20,7 @@ import { DebugFlags } from "../DebugFlags";
 import { VoiceMetrics } from "./VoiceMetrics";
 import { SensorNode } from "./SensorNode";
 import { shouldIgnoreOffer } from "./glare";
+import { mungeDtx } from "./sdp";
 
 /** Sends one signalling blob to a target player via the server gateway. */
 export type RtcSignalSender = (targetIndex: number, json: string) => void;
@@ -236,7 +237,13 @@ export class VoiceRTC {
     private async makeOffer(peer: Peer): Promise<void> {
         try {
             peer.makingOffer = true;
-            await peer.pc.setLocalDescription();   // implicit createOffer
+            if (this.dtxOn) {
+                const offer = await peer.pc.createOffer();
+                offer.sdp = mungeDtx(offer.sdp || "");
+                await peer.pc.setLocalDescription(offer);
+            } else {
+                await peer.pc.setLocalDescription();   // implicit createOffer
+            }
             this.sendSignal(peer.index, JSON.stringify({ k: "offer", sdp: peer.pc.localDescription, nonce: this.nonce }));
             this.dbg("→ offer to", peer.index);
         } catch (e) {
@@ -256,6 +263,87 @@ export class VoiceRTC {
         peer.audioEl.srcObject = stream;
         const p = peer.audioEl.play();
         if (p && (p as any).catch) { (p as Promise<void>).catch(() => {}); }
+    }
+
+    // ── proximity mesh maintenance ────────────────────────────────────────────
+
+    /**
+     * Reconcile the live mesh with the set of in-range neighbour indices (call
+     * each tick). New neighbours open a peer and offer; departed ones are torn
+     * down, or held warm for the grace window. Both sides may offer; perfect
+     * negotiation resolves any glare.
+     */
+    async updateProximity(neighborIndices: Set<number>): Promise<void> {
+        if (!this.enabled) { return; }
+
+        for (const idx of [...this.peers.keys()]) {
+            if (neighborIndices.has(idx)) { continue; }
+            const p = this.peers.get(idx)!;
+            if (this.graceMs <= 0) {
+                this.closePeer(idx, true);
+            } else if (p.graceUntil === 0) {
+                // Enter grace: hold the link, stop sending now (a node out of range
+                // must not be heard), resume if the neighbour returns within W.
+                p.graceUntil = Date.now() + this.graceMs;
+                this.setPeerSending(p, false);
+                this.dbg("neighbor", idx, "left range → grace", this.graceMs, "ms (tx muted)");
+            } else if (Date.now() >= p.graceUntil) {
+                this.closePeer(idx, true);
+            }
+        }
+
+        for (const idx of neighborIndices) {
+            // Watchdog — nothing re-offers on its own (onnegotiationneeded is
+            // one-shot), so a peer that never reaches "connected" would wedge.
+            // Tier 1 (3 s): SDP negotiated but ICE never started — restartIce on
+            // the impolite side only (a simultaneous restart is a fresh glare).
+            // Tier 2 (8 s): anything else — close and let the next tick recreate.
+            const stuck = this.peers.get(idx);
+            if (stuck && !stuck.everConnected) {
+                const age = Date.now() - stuck.bornMs;
+                if (!stuck.iceRestarted && age > 3000 &&
+                    stuck.pc.signalingState === "stable" && stuck.pc.iceConnectionState === "new" &&
+                    stuck.remoteNonce >= 0 && this.nonce > stuck.remoteNonce) {
+                    stuck.iceRestarted = true;
+                    this.dbg("watchdog: peer", idx, "stable but ICE never started → restartIce");
+                    try { (stuck.pc as any).restartIce(); } catch { /* unsupported */ }
+                }
+                if (age > 8000) {
+                    this.dbg("watchdog: peer", idx, "never connected in 8s → recreate");
+                    this.closePeer(idx, true);
+                    continue;
+                }
+            }
+
+            // Returned within the grace window: the link never dropped — resume tx.
+            const held = this.peers.get(idx);
+            if (held && held.graceUntil > 0) {
+                held.graceUntil = 0;
+                this.setPeerSending(held, true);
+                this.dbg("neighbor", idx, "returned within grace → resume tx (warm link)");
+            }
+
+            // Skip if the peer exists or is still mid-creation (getUserMedia is
+            // async, so the ensuring guard stops a per-tick offer storm).
+            if (this.peers.has(idx) || this.ensuring.has(idx)) { continue; }
+            this.dbg("new neighbor", idx, "→ open peer");
+            VoiceMetrics.markDetected(idx);   // start the link setup-time clock
+            void this.ensurePeer(idx);        // onnegotiationneeded fires the single offer
+        }
+    }
+
+    /** Stop/resume sending to one peer without touching the shared track. */
+    private setPeerSending(peer: Peer, on: boolean): void {
+        try {
+            for (const s of peer.pc.getSenders()) {
+                if (on) {
+                    const t = this.localStream ? this.localStream.getAudioTracks()[0] : null;
+                    if (t) { void s.replaceTrack(t); }
+                } else if (s.track) {
+                    void s.replaceTrack(null);
+                }
+            }
+        } catch { /* pc closing */ }
     }
 
     // ── inbound signalling (perfect negotiation) ─────────────────────────────
@@ -280,7 +368,13 @@ export class VoiceRTC {
                     await peer.pc.setRemoteDescription(msg.sdp);
                     peer.remoteSet = true;
                     await this.flushIce(peer);
-                    await peer.pc.setLocalDescription();   // implicit createAnswer
+                    if (this.dtxOn) {
+                        const answer = await peer.pc.createAnswer();
+                        answer.sdp = mungeDtx(answer.sdp || "");
+                        await peer.pc.setLocalDescription(answer);
+                    } else {
+                        await peer.pc.setLocalDescription();   // implicit createAnswer
+                    }
                     this.sendSignal(fromIndex, JSON.stringify({ k: "answer", sdp: peer.pc.localDescription, nonce: this.nonce }));
                     this.dbg("→ answer to", fromIndex);
                 } else {
