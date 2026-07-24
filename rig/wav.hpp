@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -112,6 +113,35 @@ inline bool read(const std::string& path, Wav& out, std::string* err = nullptr) 
         if (err) *err = "unsupported WAV sample format";
         return false;
     }
+    return true;
+}
+
+// Write interleaved float samples as 16-bit PCM.
+inline bool write16(const std::string& path, const Wav& w, std::string* err = nullptr) {
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) { if (err) *err = "cannot write " + path; return false; }
+
+    const uint16_t ch = w.channels ? w.channels : 1;
+    const uint32_t rate = w.sampleRate;
+    const uint16_t bits = 16;
+    const uint16_t blockAlign = (uint16_t)(ch * bits / 8);
+    const uint32_t byteRate = rate * blockAlign;
+    const uint32_t dataBytes = (uint32_t)w.samples.size() * 2;
+    const uint32_t riff = 36 + dataBytes;
+
+    auto w32 = [&](uint32_t v) { uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) }; fwrite(b, 1, 4, f); };
+    auto w16 = [&](uint16_t v) { uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) }; fwrite(b, 1, 2, f); };
+
+    fwrite("RIFF", 1, 4, f); w32(riff); fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f); w32(16); w16(1); w16(ch); w32(rate); w32(byteRate); w16(blockAlign); w16(bits);
+    fwrite("data", 1, 4, f); w32(dataBytes);
+    for (float s : w.samples) {
+        if (s > 1.0f) s = 1.0f;
+        if (s < -1.0f) s = -1.0f;
+        int32_t v = (int32_t)lrintf(s * 32767.0f);
+        w16((uint16_t)(int16_t)v);
+    }
+    fclose(f);
     return true;
 }
 
