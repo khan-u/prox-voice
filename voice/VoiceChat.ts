@@ -10,9 +10,11 @@
  * Phase-2 WebRTC mesh; the PCM math lives in ./pcm so it can be tested.
  */
 import { DebugFlags } from "../DebugFlags";
+import { flatten, downsample, peakAmplitude } from "./pcm";
 
 const TRANSFORMERS_CDN = "https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2";
 const WHISPER_MODEL = "Xenova/whisper-tiny.en";
+const TARGET_SAMPLE_RATE = 16000;
 
 // Inline module-worker source, kept as a string so the bundler never processes
 // it; created via a Blob URL below.
@@ -77,6 +79,17 @@ export class VoiceChat {
     private statusEl: HTMLDivElement | null = null;
     private visible = false;
     private lastProgressLogged = -10;
+
+    // ── capture state ─────────────────────────────────────────────────────────
+    private audioContext: AudioContext | null = null;
+    private mediaStream: MediaStream | null = null;
+    private sourceNode: MediaStreamAudioSourceNode | null = null;
+    private processor: ScriptProcessorNode | null = null;
+    private recording = false;
+    private captured: Float32Array[] = [];
+    private deviceSampleRate = 48000;
+    private reqId = 0;
+    private recordStartMs = 0;
 
     private constructor(onTranscript: TranscriptHandler) {
         this.onTranscript = onTranscript;
@@ -200,7 +213,80 @@ export class VoiceChat {
         this.button.style.opacity = busy ? "0.6" : "1";
     }
 
-    // Capture (startRecording / stopRecording) lands with the PCM helpers.
-    private async startRecording(): Promise<void> { void this.modelReady; }
-    private stopRecording(): void { this.setButtonActive(false); }
+    // ── audio capture ─────────────────────────────────────────────────────────
+
+    private async startRecording(): Promise<void> {
+        if (this.recording) { return; }
+        try {
+            if (this.mediaStream == null) {
+                // First press → permission prompt (this is the required gesture).
+                this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+                });
+            }
+            if (this.audioContext == null) {
+                const Ctx = (window as any).AudioContext || (window as any).webkitAudioContext;
+                this.audioContext = new Ctx();
+                this.deviceSampleRate = this.audioContext!.sampleRate || 48000;
+            }
+            // iOS/Safari can leave the context "suspended"/"interrupted"; resume on
+            // anything not actively running or the processor delivers silence.
+            if (this.audioContext!.state !== "running") { await this.audioContext!.resume(); }
+
+            if (!this.modelReady) { this.worker?.postMessage({ type: "preload" }); }
+
+            this.captured = [];
+            // WebKit allows only one MediaStreamAudioSourceNode per stream — a second
+            // one yields silent buffers (the "works on macOS, silent on iOS" bug), so
+            // create the source once and rebuild only the processor per clip.
+            if (this.sourceNode == null) {
+                this.sourceNode = this.audioContext!.createMediaStreamSource(this.mediaStream);
+            } else {
+                try { this.sourceNode.disconnect(); } catch { /* clear stale link */ }
+            }
+            this.processor = this.audioContext!.createScriptProcessor(4096, 1, 1);
+            this.processor.onaudioprocess = (ev: AudioProcessingEvent) => {
+                if (!this.recording) { return; }
+                this.captured.push(new Float32Array(ev.inputBuffer.getChannelData(0)));   // copy — buffer is reused
+            };
+            this.sourceNode.connect(this.processor);
+            this.processor.connect(this.audioContext!.destination);
+            this.recording = true;
+            this.recordStartMs = typeof performance !== "undefined" ? performance.now() : 0;
+            this.setStatus(this.modelReady ? "listening…" : "listening… (model loading)");
+            this.setButtonActive(true);
+        } catch (e) {
+            console.error("[voice] mic start failed", e);
+            this.setStatus("mic blocked or unavailable");
+        }
+    }
+
+    private stopRecording(): void {
+        if (!this.recording) { return; }
+        this.recording = false;
+        this.setButtonActive(false);
+        try {
+            if (this.processor) { this.processor.disconnect(); this.processor.onaudioprocess = null; }
+            if (this.sourceNode) { this.sourceNode.disconnect(); }   // keep it alive for reuse
+        } catch { /* teardown race */ }
+        this.processor = null;
+
+        const mono = flatten(this.captured);
+        this.captured = [];
+        if (mono.length < this.deviceSampleRate * 0.25) {
+            // < 0.25 s — likely an accidental tap.
+            this.setStatus("voice ready — hold to talk");
+            return;
+        }
+        const heldMs = this.recordStartMs ? Math.round(performance.now() - this.recordStartMs) : 0;
+        const peak = peakAmplitude(mono);
+        this.dbg("captured", mono.length, "samples in", heldMs + "ms, peak", peak.toFixed(4), peak < 0.005 ? "⚠ SILENT" : "");
+        const audio16k = downsample(mono, this.deviceSampleRate, TARGET_SAMPLE_RATE);
+        this.setButtonBusy(true);
+        this.setStatus("transcribing…");
+        const id = ++this.reqId;
+        this.lastProgressLogged = -10;
+        // Transfer the underlying buffer to avoid a copy.
+        this.worker?.postMessage({ type: "transcribe", id, audio: audio16k }, [audio16k.buffer]);
+    }
 }
