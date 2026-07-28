@@ -47,6 +47,18 @@ int main() {
     CHECK(dec.size() == 2);
     CHECK(dec[0] == 0.0f && dec[1] == 4.0f);
 
+    // NCC: a window with itself is 1.0; a window against a shifted copy is lower.
+    std::vector<float> sig = tone(fs, 1000, 2048);
+    CHECK(std::fabs(rigdsp::ncc(sig, 0, sig, 0, 512) - 1.0) < 1e-9);
+    CHECK(rigdsp::ncc(sig, 0, sig, 7, 512) < 0.99);   // quarter-period-ish shift decorrelates
+
+    // Percentile: interpolated median and p95 of a known ramp.
+    std::vector<double> ramp;
+    for (int i = 0; i <= 100; i++) { ramp.push_back((double)i); }
+    CHECK(std::fabs(rigdsp::percentile(ramp, 50) - 50.0) < 1e-9);
+    CHECK(std::fabs(rigdsp::percentile(ramp, 95) - 95.0) < 1e-9);
+    CHECK(rigdsp::percentile({}, 50) == 0.0);
+
     printf("%s: test_dsp (%d checks failed)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

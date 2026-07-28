@@ -2,6 +2,7 @@
 // unit-tested on its own: an RBJ band-pass biquad, an amplitude envelope, and
 // decimation. No I/O, no argument parsing.
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -52,6 +53,33 @@ inline std::vector<float> decimate(const std::vector<float>& in, int d) {
     out.reserve(in.size() / (size_t)d + 1);
     for (size_t i = 0; i < in.size(); i += (size_t)d) { out.push_back(in[i]); }
     return out;
+}
+
+// Zero-normalized cross-correlation of a[ai..ai+W) against b[bi..bi+W) → [-1,1].
+// 1.0 for identical windows; ~0 for uncorrelated ones.
+inline double ncc(const std::vector<float>& a, size_t ai,
+                  const std::vector<float>& b, size_t bi, size_t W) {
+    double ma = 0, mb = 0;
+    for (size_t k = 0; k < W; k++) { ma += a[ai + k]; mb += b[bi + k]; }
+    ma /= W; mb /= W;
+    double num = 0, da = 0, db = 0;
+    for (size_t k = 0; k < W; k++) {
+        double xa = a[ai + k] - ma, xb = b[bi + k] - mb;
+        num += xa * xb; da += xa * xa; db += xb * xb;
+    }
+    if (da <= 0 || db <= 0) return 0.0;
+    return num / std::sqrt(da * db);
+}
+
+// Linearly-interpolated percentile of a sample (copy sorted in place).
+inline double percentile(std::vector<double> v, double p) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    double idx = p / 100.0 * (double)(v.size() - 1);
+    size_t lo = (size_t)std::floor(idx);
+    size_t hi = (size_t)std::ceil(idx);
+    double frac = idx - (double)lo;
+    return v[lo] * (1.0 - frac) + v[hi] * frac;
 }
 
 }   // namespace rigdsp
