@@ -11,6 +11,7 @@
 #include "wav.hpp"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <string>
 
@@ -51,10 +52,34 @@ void mix(const rigwav::Wav& s, const Params& p, rigwav::Wav& o) {
     }
 }
 
+bool parseArgs(int argc, char** argv, Params& p) {
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        auto nextD = [&](double& d) { if (i + 1 < argc) d = atof(argv[++i]); };
+        if      (a == "--in")         { if (i + 1 < argc) p.in = argv[++i]; }
+        else if (a == "--out")        { if (i + 1 < argc) p.out = argv[++i]; }
+        else if (a == "--delay-ms")   nextD(p.delayMs);
+        else if (a == "--gain")       nextD(p.gain);
+        else if (a == "--noise")      nextD(p.noise);
+        else if (a == "--preroll-ms") nextD(p.prerollMs);
+        else if (a == "--seed")       { if (i + 1 < argc) p.seed = (unsigned)strtoul(argv[++i], nullptr, 10); }
+        else if (a == "--help") {
+            printf("usage: %s [--in stimulus.wav] [--out synth_rec.wav] [--delay-ms 85]"
+                   " [--gain 0.5] [--noise 0.02] [--preroll-ms 250] [--seed 42]\n", argv[0]);
+            return false;
+        } else {
+            fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str());
+            exit(2);
+        }
+    }
+    return true;
+}
+
 }   // namespace
 
-int main() {
+int main(int argc, char** argv) {
     Params p;
+    if (!parseArgs(argc, argv, p)) { return 0; }
     rigwav::Wav s;
     std::string err;
     if (!rigwav::read(p.in, s, &err)) { fprintf(stderr, "read failed: %s\n", err.c_str()); return 1; }
