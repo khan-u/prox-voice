@@ -8,6 +8,8 @@
 #include "wav.hpp"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 namespace {
 
@@ -42,10 +44,35 @@ bool synthClickTrain(const Params& p, rigwav::Wav& w) {
     return true;
 }
 
+// Returns false only for --help (so main can exit 0 without generating).
+bool parseArgs(int argc, char** argv, Params& p) {
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        auto nextD = [&](double& d) { if (i + 1 < argc) d = atof(argv[++i]); };
+        if      (a == "--fs")       nextD(p.fs);
+        else if (a == "--freq")     nextD(p.freq);
+        else if (a == "--burst-ms") nextD(p.burstMs);
+        else if (a == "--period")   nextD(p.periodS);
+        else if (a == "--amp")      nextD(p.amp);
+        else if (a == "--bursts")   { if (i + 1 < argc) p.bursts = atoi(argv[++i]); }
+        else if (a == "--out")      { if (i + 1 < argc) p.out = argv[++i]; }
+        else if (a == "--help") {
+            printf("usage: %s [--fs N] [--freq HZ] [--burst-ms MS] [--period S]"
+                   " [--amp 0..1] [--bursts N] [--out FILE]\n", argv[0]);
+            return false;
+        } else {
+            fprintf(stderr, "unknown arg: %s (try --help)\n", a.c_str());
+            exit(2);
+        }
+    }
+    return true;
+}
+
 }   // namespace
 
-int main() {
+int main(int argc, char** argv) {
     Params p;
+    if (!parseArgs(argc, argv, p)) { return 0; }
     rigwav::Wav w;
     if (!synthClickTrain(p, w)) { fprintf(stderr, "bad parameters (burst must fit inside period)\n"); return 2; }
 
