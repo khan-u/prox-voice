@@ -14,6 +14,7 @@
 #include "wav.hpp"
 #include "dsp.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -53,6 +54,22 @@ std::vector<size_t> findClicks(const std::vector<float>& refEnv, double fs, doub
     return peaks;
 }
 
+struct Burst {
+    int idx;
+    double tRefS;
+    double latencyMs;
+    double corrPeak;
+    double qualityDb;
+    bool kept;
+};
+
+// Parabolic sub-sample interpolation around an integer NCC peak → fractional bin offset.
+double parabolicPeak(double ym1, double y0, double yp1) {
+    double denom = 2.0 * (ym1 - 2.0 * y0 + yp1);
+    if (std::fabs(denom) < 1e-12) return 0.0;
+    return (ym1 - yp1) / denom;
+}
+
 }   // namespace
 
 int main(int argc, char** argv) {
@@ -86,5 +103,71 @@ int main(int argc, char** argv) {
 
     printf("PROX-VOICE loopback rig — input %s (%.1f s, %u ch @ %.0f Hz), clicks found: %zu\n",
            p.path.c_str(), (double)F / fs, w.channels, fs, peaks.size());
+    if (peaks.empty()) return 0;
+
+    // Decimate for the cross-correlation search (lower rate → shorter NCC windows,
+    // faster search). Full-rate envelope used only for click detection above.
+    std::vector<float> refD = rigdsp::decimate(refEnv, p.decim);
+    std::vector<float> micD = rigdsp::decimate(micEnv, p.decim);
+    const double fsD = fs / (double)p.decim;
+
+    // Noise floor: RMS of the first 0.5 s of the decimated mic envelope, before any
+    // click arrives — used as the reference level for the quality-gate dB check.
+    const size_t noiseWin = std::min((size_t)(0.5 * fsD), micD.size() / 4);
+    double noiseSum = 0.0;
+    for (size_t i = 0; i < noiseWin; i++) { noiseSum += (double)micD[i] * micD[i]; }
+    const double noiseFloor = noiseWin > 0 ? std::sqrt(noiseSum / (double)noiseWin) : 1e-9;
+
+    const size_t winD = (size_t)(p.winMs    / 1000.0 * fsD);
+    const size_t preD = (size_t)(p.preMs    / 1000.0 * fsD);
+    const size_t lagD = (size_t)(p.maxLagMs / 1000.0 * fsD);
+
+    printf("\n%6s  %8s  %10s  %8s  %8s  %s\n",
+           "burst", "t_ref_s", "latency_ms", "corr", "qual_db", "kept");
+
+    std::vector<Burst> bursts;
+    for (size_t bi = 0; bi < peaks.size(); bi++) {
+        const size_t pkD      = peaks[bi] / (size_t)p.decim;
+        const size_t refStart = (pkD >= preD) ? pkD - preD : 0;
+        if (refStart + winD > refD.size()) continue;
+
+        // Slide the mic window from refStart to refStart + lagD, maximise NCC.
+        double bestCorr = -2.0;
+        size_t bestLag  = 0;
+        const size_t maxLag = (micD.size() > refStart + winD)
+                              ? std::min(lagD, micD.size() - refStart - winD)
+                              : 0;
+        for (size_t lag = 0; lag <= maxLag; lag++) {
+            if (refStart + lag + winD > micD.size()) break;
+            double c = rigdsp::ncc(refD, refStart, micD, refStart + lag, winD);
+            if (c > bestCorr) { bestCorr = c; bestLag = lag; }
+        }
+
+        // Parabolic refinement: fit a parabola through the three samples around
+        // the integer-lag peak to recover the sub-sample maximum.
+        double fracOff = 0.0;
+        if (bestLag > 0 && bestLag < maxLag) {
+            double ym1 = rigdsp::ncc(refD, refStart, micD, refStart + bestLag - 1, winD);
+            double yp1 = rigdsp::ncc(refD, refStart, micD, refStart + bestLag + 1, winD);
+            fracOff = parabolicPeak(ym1, bestCorr, yp1);
+        }
+        const double latencyMs = ((double)bestLag + fracOff) / fsD * 1000.0;
+
+        // Quality gate 1: mic envelope level at echo onset vs noise floor (dB).
+        const size_t echoIdx = std::min(refStart + bestLag + preD, micD.size() - 1);
+        const double qDb = 20.0 * std::log10(std::max((double)micD[echoIdx], 1e-9)
+                                             / std::max(noiseFloor, 1e-9));
+
+        // Quality gate 2: absolute correlation coefficient threshold.
+        const bool kept = (qDb >= p.minDb) && (bestCorr >= p.minCorr);
+
+        bursts.push_back({ (int)bi + 1, (double)peaks[bi] / fs, latencyMs, bestCorr, qDb, kept });
+        printf("%6d  %8.3f  %10.2f  %8.4f  %8.2f  %s\n",
+               (int)bi + 1, (double)peaks[bi] / fs, latencyMs, bestCorr, qDb, kept ? "Y" : "-");
+    }
+
+    int keptN = 0;
+    for (const auto& b : bursts) { if (b.kept) keptN++; }
+    printf("\nbursts: %zu total, %d kept (both quality gates passed)\n", bursts.size(), keptN);
     return 0;
 }
