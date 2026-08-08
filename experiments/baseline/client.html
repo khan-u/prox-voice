@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>PROX-VOICE baseline client</title></head>
+<body>
+<pre id="log">baseline client</pre>
+<script>
+// Minimal browser peer for the server-mixed baseline. getUserMedia (fake mic),
+// offer to the SFU, then expose window.baselineStats() → candidate-pair RTT to
+// the server (the hop the latency ruler measures). Loaded over http://127.0.0.1
+// which is a secure context, so getUserMedia works without HTTPS.
+const logEl = document.getElementById('log');
+const say = (s) => { logEl.textContent += "\n" + s; };
+let pc = null, connected = false;
+
+async function start() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: false
+  });
+  pc = new RTCPeerConnection();
+  for (const t of stream.getAudioTracks()) pc.addTrack(t, stream);
+  // Play back whatever the SFU forwards (keeps the inbound pipeline pulling).
+  pc.ontrack = (e) => {
+    const a = document.createElement('audio');
+    a.autoplay = true;
+    a.srcObject = e.streams[0] || new MediaStream([e.track]);
+    document.body.appendChild(a);
+  };
+  pc.onconnectionstatechange = () => { connected = (pc.connectionState === 'connected'); say('state ' + pc.connectionState); };
+
+  const ws = new WebSocket('ws://' + location.host + '/ws');
+  pc.onicecandidate = (e) => { if (e.candidate && ws.readyState === 1) ws.send(JSON.stringify({ t: 'ice', candidate: e.candidate.toJSON() })); };
+  ws.onopen = async () => {
+    await pc.setLocalDescription(await pc.createOffer());
+    ws.send(JSON.stringify({ t: 'offer', sdp: pc.localDescription }));
+    say('sent offer');
+  };
+  ws.onmessage = async (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.t === 'answer') { await pc.setRemoteDescription(m.sdp); say('got answer'); }
+    else if (m.t === 'ice' && m.candidate) { try { await pc.addIceCandidate(m.candidate); } catch (_) {} }
+  };
+}
+
+// Candidate-pair RTT to the SFU + inbound audio liveness (emitted samples).
+window.baselineStats = async () => {
+  if (!pc) return { connected: false };
+  let rttMs = -1, samples = 0, level = 0, outPkts = 0;
+  const stats = await pc.getStats();
+  stats.forEach((s) => {
+    if (s.type === 'candidate-pair' && s.state === 'succeeded'
+        && (s.nominated || s.selected) && typeof s.currentRoundTripTime === 'number') {
+      rttMs = Math.round(s.currentRoundTripTime * 1000);
+    }
+    if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+      if (typeof s.jitterBufferEmittedCount === 'number') samples += s.jitterBufferEmittedCount;
+      if (typeof s.audioLevel === 'number') level = Math.max(level, s.audioLevel);
+    }
+    if (s.type === 'outbound-rtp' && s.kind === 'audio' && typeof s.packetsSent === 'number') outPkts += s.packetsSent;
+  });
+  return { connected, rttMs, samples, level, outPkts };
+};
+window.addEventListener('load', () => { start().catch((e) => say('ERR ' + e)); });
+</script>
+</body>
+</html>
