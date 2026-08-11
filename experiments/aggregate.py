@@ -139,9 +139,138 @@ def sensing():
         print(f"{sc:>8} {r['n']:>6} {str(med(r['sup'])):>8}  {kinds}")
 
 
+def realnet():
+    """Multi-condition real-network data, two sources:
+    1. wsn-voice-<condition tags>-trial<k>.json files (manual exports);
+    2. wsn-remote-reports.jsonl (the client auto-reporter behind ?wsncond=,
+       collected off the serving host — see collect-remote.sh). Each session
+       (sid = one pageload) contributes its LAST report.
+    Groups by condition tag; prints one row of medians per condition."""
+    import re
+
+    def add(rows, cond, k):
+        row = rows.setdefault(cond, {"setup": [], "ice": [], "relay": [], "lat": [], "glare": 0, "n": 0})
+        row["n"] += 1
+        for src, dst in [("setupMedianMs", "setup"), ("iceSuccessPct", "ice"),
+                         ("relayPct", "relay"), ("latRawMedianMs", "lat")]:
+            v = k.get(src)
+            if isinstance(v, (int, float)) and v >= 0:
+                row[dst].append(v)
+        if isinstance(k.get("glareTotal"), (int, float)):
+            row["glare"] += k["glareTotal"]
+
+    # Per-link high-res timing, gathered alongside the KPI rows (from the
+    # reporter's links[] array): setup time + candidate-pair RTT + candidate
+    # type, one sample per connected link across all sessions in a condition.
+    linkstats = {}
+
+    def add_links(cond, links):
+        if not links:
+            return
+        ls = linkstats.setdefault(cond, {"setup": [], "rtt": [], "cand": {}})
+        for lk in links:
+            if isinstance(lk.get("setupMs"), (int, float)) and lk["setupMs"] >= 0:
+                ls["setup"].append(lk["setupMs"])
+            if isinstance(lk.get("rttMs"), (int, float)) and lk["rttMs"] >= 0:
+                ls["rtt"].append(lk["rttMs"])
+            ct = lk.get("candidateType") or "?"
+            ls["cand"][ct] = ls["cand"].get(ct, 0) + 1
+
+    rows = {}
+    for f in sorted(glob.glob(os.path.join(DATA, "wsn-voice-*trial*.json"))):
+        m = re.match(r"wsn-voice-(.+)-trial\d+", os.path.basename(f))
+        if not m:
+            continue
+        d = json.load(open(f))
+        add(rows, m.group(1), d.get("kpis", d))
+        add_links(m.group(1), d.get("links"))
+    jl = os.path.join(DATA, "wsn-remote-reports.jsonl")
+    if os.path.exists(jl):
+        last = {}   # (cond, sid) → latest report
+        for line in open(jl):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            key = (r.get("cond"), r.get("sid"))
+            if key[0] and (key not in last or r.get("ts", 0) >= last[key].get("ts", 0)):
+                last[key] = r
+        for r in last.values():
+            if r.get("kpis"):
+                add(rows, r["cond"], r["kpis"])
+            add_links(r["cond"], r.get("links"))
+    if not rows:
+        print("\n== Real-network conditions ==\n  (no wsn-voice-<condition>-trial<k>.json files yet)")
+        return
+    print("\n== Real-network conditions (per filename/URL tag) ==")
+    print(f"{'condition':>28} {'n':>3} {'setupMed':>8} {'ICE%':>5} {'relay%':>6} {'m2e~ms':>6} {'glare':>5}")
+    for cond in sorted(rows):
+        r = rows[cond]
+        print(f"{cond:>28} {r['n']:>3} {str(med(r['setup'])):>8} {str(mean(r['ice'])):>5} "
+              f"{str(mean(r['relay'])):>6} {str(mean(r['lat'])):>6} {r['glare']:>5}")
+    if linkstats:
+        print("\n-- per-connection high-res timing (all links in each condition) --")
+        print(f"{'condition':>28} {'links':>5} {'setupMed':>8} {'rttMed':>6} candidate mix")
+        for cond in sorted(linkstats):
+            ls  = linkstats[cond]
+            mix = " ".join(f"{k}={v}" for k, v in sorted(ls["cand"].items()))
+            print(f"{cond:>28} {len(ls['setup']):>5} {str(med(ls['setup'])):>8} "
+                  f"{str(med(ls['rtt'])):>6} {mix}")
+
+
+def gracegap():
+    files = sorted(glob.glob(os.path.join(DATA, "wsn-gracegap-*.json")))
+    if not files:
+        print("\n== Grace-window sweep ==\n  (no data yet — run: HEADED=1 node gracegap.cjs <W> 6)")
+        return
+    # Group by (absence D, grace W): the D=6 s sweep and the D=12 s knee
+    # validation are separate experiments and must not be merged. A run counts
+    # only when its reconnect gap was measured (reconnectGapMs>=0); the stop
+    # detector occasionally fails at W=0 (returns <0) without affecting the
+    # reconnect gap, so we gate on the gap, not the whole `valid` flag.
+    byDW = {}
+    for f in files:
+        d   = json.load(open(f))
+        if d.get("reconnectGapMs", -1) < 0:
+            continue
+        key = (d.get("absenceMs", -1), d.get("graceMs", -1))
+        r   = byDW.setdefault(key, {"gap": [], "hold": [], "stop": []})
+        r["gap"].append(d["reconnectGapMs"])
+        if d.get("holdKbps", -1) >= 0: r["hold"].append(d["holdKbps"])
+        if d.get("stopAfterOutMs", -1) >= 0: r["stop"].append(d["stopAfterOutMs"])
+    for D in sorted({k[0] for k in byDW}):
+        print(f"\n== Grace-window sweep (duty cycling; {D // 1000} s absence) ==")
+        print(f"{'W (ms)':>7} {'n':>3} {'gap med':>8} {'gap range':>13} {'stop med':>8} {'hold kbps':>9}")
+        for (dd, w) in sorted(k for k in byDW if k[0] == D):
+            r = byDW[(dd, w)]
+            g = sorted(r["gap"])
+            print(f"{w:>7} {len(g):>3} {med(r['gap']):>8} {str(min(g))+'-'+str(max(g)):>13} "
+                  f"{med(r['stop']) if r['stop'] else '-':>8} {med(r['hold']) if r['hold'] else '-':>9}")
+
+
+def dtx():
+    files = sorted(glob.glob(os.path.join(DATA, "wsn-dtx-*.json")))
+    if not files:
+        print("\n== DTX uplink ==\n  (no data yet — run: HEADED=1 node dtxtest.cjs <tone|speech> <0|1>)")
+        return
+    by = {}
+    for f in files:
+        d   = json.load(open(f))
+        key = (d.get("source"), bool(d.get("dtx")))
+        by.setdefault(key, []).append(d.get("uplinkKbps", -1))
+    print("\n== DTX uplink (media-plane event-driven transmission) ==")
+    print(f"{'source':>8} {'dtx':>5} {'n':>3} {'uplink kbps med':>15}")
+    for (srcname, dtxon) in sorted(by):
+        v = [x for x in by[(srcname, dtxon)] if x >= 0]
+        print(f"{srcname:>8} {('on' if dtxon else 'off'):>5} {len(v):>3} {med(v):>15}")
+
+
 if __name__ == "__main__":
     print(f"data dir: {DATA}\n")
     group12()
     group3()
     audiogap()
     sensing()
+    realnet()
+    gracegap()
+    dtx()
