@@ -6,7 +6,7 @@
 // known amount, attenuated, and buried in Gaussian noise (the acoustic mic
 // path). Equal pre-roll silence is prepended to both channels to mimic an
 // arbitrary record start — that common offset must cancel in the measured
-// latency, which is a genuine robustness check. Run analyze on the output and
+// latency, which is a genuine validity check. Run analyze on the output and
 // confirm it recovers --delay-ms.
 #include "wav.hpp"
 #include <cmath>

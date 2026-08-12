@@ -1,0 +1,20 @@
+# Node
+node_modules/
+
+# Compiled rig binaries
+rig/stimulus
+rig/analyze
+rig/synth_recording
+rig/tests/test_dsp
+rig/tests/test_wav
+
+# make check outputs
+rig/stimulus.wav
+rig/synth_rec.wav
+rig/rig_latency.csv
+
+# Generated audio fixtures (reproduced by ensureToneWav / ensureSpeechWav on first run)
+experiments/assets/
+
+# OS
+.DS_Store

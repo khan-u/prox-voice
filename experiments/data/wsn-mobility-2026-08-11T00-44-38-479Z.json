@@ -1,0 +1,26 @@
+{
+ "exportedAt": "2026-08-11T00:45:53.509Z",
+ "awayTiles": 25,
+ "phases": {
+  "initialForm": {
+   "ms": 1827,
+   "bPeers": 1
+  },
+  "teardown": {
+   "ms": 18365,
+   "aPos": {
+    "x": 91,
+    "y": 68
+   },
+   "bPeers": 0
+  },
+  "reconnect": {
+   "ms": -1,
+   "aPos": {
+    "x": 66,
+    "y": 68
+   },
+   "bPeers": 0
+  }
+ }
+}

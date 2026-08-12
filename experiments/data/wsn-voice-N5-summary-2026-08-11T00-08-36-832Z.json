@@ -1,0 +1,137 @@
+{
+ "exportedAt": "2026-08-11T00:09:36.559Z",
+ "N": 5,
+ "holdMs": 40000,
+ "perClient": [
+  {
+   "client": "wsn0",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 4,
+   "kpis": {
+    "links": 3,
+    "iceAttempts": 3,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 310,
+    "setupP95Ms": 1114,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 3,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 70,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   }
+  },
+  {
+   "client": "wsn1",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 4,
+   "kpis": {
+    "links": 3,
+    "iceAttempts": 3,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 300,
+    "setupP95Ms": 1076,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 3,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 74,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 2
+   }
+  },
+  {
+   "client": "wsn2",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 4,
+   "kpis": {
+    "links": 4,
+    "iceAttempts": 4,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 619,
+    "setupP95Ms": 677,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 4,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 65,
+    "latRawP95Ms": 71,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 2
+   }
+  },
+  {
+   "client": "wsn3",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 4,
+   "kpis": {
+    "links": 2,
+    "iceAttempts": 2,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 510,
+    "setupP95Ms": 791,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 2,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 71,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 1
+   }
+  },
+  {
+   "client": "wsn4",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 4,
+   "kpis": {
+    "links": 0,
+    "iceAttempts": 0,
+    "iceSuccessPct": -1,
+    "setupMedianMs": -1,
+    "setupP95Ms": -1,
+    "relayPct": -1,
+    "candidateMix": {
+     "host": 0,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": -1,
+    "latRawP95Ms": -1,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   }
+  }
+ ]
+}

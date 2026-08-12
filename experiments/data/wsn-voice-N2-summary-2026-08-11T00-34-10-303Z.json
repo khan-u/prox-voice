@@ -1,0 +1,73 @@
+{
+ "exportedAt": "2026-08-11T00:35:06.673Z",
+ "N": 2,
+ "holdMs": 45000,
+ "perClient": [
+  {
+   "client": "wsn0",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 1,
+   "kpis": {
+    "links": 1,
+    "iceAttempts": 1,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 595,
+    "setupP95Ms": 595,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 1,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 70,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   },
+   "sense": {
+    "samples": 23,
+    "reports": 3,
+    "suppressedPct": 87
+   },
+   "meanUpKbps": 24,
+   "energy": 0.52
+  },
+  {
+   "client": "wsn1",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 1,
+   "kpis": {
+    "links": 1,
+    "iceAttempts": 1,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 358,
+    "setupP95Ms": 358,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 1,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 77,
+    "latRawP95Ms": 77,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   },
+   "sense": {
+    "samples": 23,
+    "reports": 3,
+    "suppressedPct": 87
+   },
+   "meanUpKbps": 24,
+   "energy": 0.52
+  }
+ ]
+}

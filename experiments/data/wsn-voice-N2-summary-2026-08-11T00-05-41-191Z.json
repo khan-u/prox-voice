@@ -1,0 +1,59 @@
+{
+ "exportedAt": "2026-08-11T00:06:32.752Z",
+ "N": 2,
+ "holdMs": 40000,
+ "perClient": [
+  {
+   "client": "wsn0",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 1,
+   "kpis": {
+    "links": 1,
+    "iceAttempts": 1,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 694,
+    "setupP95Ms": 694,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 1,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 70,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   }
+  },
+  {
+   "client": "wsn1",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 1,
+   "kpis": {
+    "links": 1,
+    "iceAttempts": 1,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 394,
+    "setupP95Ms": 394,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 1,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 70,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   }
+  }
+ ]
+}

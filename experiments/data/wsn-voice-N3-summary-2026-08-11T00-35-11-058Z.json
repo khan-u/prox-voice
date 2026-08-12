@@ -1,0 +1,106 @@
+{
+ "exportedAt": "2026-08-11T00:36:09.707Z",
+ "N": 3,
+ "holdMs": 45000,
+ "perClient": [
+  {
+   "client": "wsn0",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 2,
+   "kpis": {
+    "links": 1,
+    "iceAttempts": 1,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 548,
+    "setupP95Ms": 548,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 1,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 60,
+    "latRawP95Ms": 60,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   },
+   "sense": {
+    "samples": 25,
+    "reports": 5,
+    "suppressedPct": 80
+   },
+   "meanUpKbps": 18,
+   "energy": 0.51
+  },
+  {
+   "client": "wsn1",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 2,
+   "kpis": {
+    "links": 2,
+    "iceAttempts": 2,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 124,
+    "setupP95Ms": 520,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 2,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 60,
+    "latRawP95Ms": 70,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 2
+   },
+   "sense": {
+    "samples": 25,
+    "reports": 5,
+    "suppressedPct": 80
+   },
+   "meanUpKbps": 20,
+   "energy": 0.51
+  },
+  {
+   "client": "wsn2",
+   "pos": {
+    "x": 66,
+    "y": 68
+   },
+   "peers": 2,
+   "kpis": {
+    "links": 2,
+    "iceAttempts": 2,
+    "iceSuccessPct": 100,
+    "setupMedianMs": 15913,
+    "setupP95Ms": 15916,
+    "relayPct": 0,
+    "candidateMix": {
+     "host": 2,
+     "srflx": 0,
+     "relay": 0
+    },
+    "latRawMedianMs": 70,
+    "latRawP95Ms": 70,
+    "latCalMedianMs": -1,
+    "latCalP95Ms": -1,
+    "glareTotal": 0
+   },
+   "sense": {
+    "samples": 9,
+    "reports": 3,
+    "suppressedPct": 78
+   },
+   "meanUpKbps": null,
+   "energy": 0.51
+  }
+ ]
+}
