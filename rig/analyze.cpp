@@ -25,7 +25,7 @@ namespace {
 struct Params {
     std::string path;
     int refCh = 0, micCh = 1, decim = 16;
-    double freq = 2000, q = 4, envMs = 2, winMs = 30, preMs = 5, maxLagMs = 1000;
+    double freq = 2000, q = 4, envMs = 2, winMs = 30, preMs = 5, maxLagMs = 1000, minLagMs = 0;
     double thrFrac = 0.30, minDb = 6.0, minCorr = 0.5, histBinMs = 10.0;
     std::string csvPath;
     double estMedian = -1;   // -1 = no calibration; >= 0 → apply offset so median == estMedian
@@ -43,6 +43,8 @@ void printHelp(const char* prog) {
         "  --win-ms T        NCC window length in ms (default 30)\n"
         "  --pre-ms T        pre-roll before click onset in ms (default 5)\n"
         "  --max-lag-ms T    maximum expected latency in ms (default 1000)\n"
+        "  --min-lag-ms T    minimum plausible latency in ms (default 0; gate out\n"
+        "                    lag~0 electrical crosstalk of the reference into ch1)\n"
         "  --thr-frac F      click detection threshold fraction of peak (default 0.30)\n"
         "  --min-db D        minimum echo SNR in dB for quality gate (default 6)\n"
         "  --min-corr C      minimum NCC for quality gate (default 0.5)\n"
@@ -67,6 +69,7 @@ bool parseArgs(int argc, char** argv, Params& p) {
         else if (strcmp(k, "--win-ms")      == 0) p.winMs       = atof(v);
         else if (strcmp(k, "--pre-ms")      == 0) p.preMs       = atof(v);
         else if (strcmp(k, "--max-lag-ms")  == 0) p.maxLagMs    = atof(v);
+        else if (strcmp(k, "--min-lag-ms")  == 0) p.minLagMs    = atof(v);
         else if (strcmp(k, "--thr-frac")    == 0) p.thrFrac     = atof(v);
         else if (strcmp(k, "--min-db")      == 0) p.minDb       = atof(v);
         else if (strcmp(k, "--min-corr")    == 0) p.minCorr     = atof(v);
@@ -173,6 +176,7 @@ int main(int argc, char** argv) {
     const size_t winD = (size_t)(p.winMs    / 1000.0 * fsD);
     const size_t preD = (size_t)(p.preMs    / 1000.0 * fsD);
     const size_t lagD = (size_t)(p.maxLagMs / 1000.0 * fsD);
+    const size_t lag0 = (size_t)(p.minLagMs / 1000.0 * fsD);
 
     printf("\n%6s  %8s  %10s  %8s  %8s  %s\n",
            "burst", "t_ref_s", "latency_ms", "corr", "qual_db", "kept");
@@ -189,7 +193,7 @@ int main(int argc, char** argv) {
         const size_t maxLag = (micD.size() > refStart + winD)
                               ? std::min(lagD, micD.size() - refStart - winD)
                               : 0;
-        for (size_t lag = 0; lag <= maxLag; lag++) {
+        for (size_t lag = lag0; lag <= maxLag; lag++) {
             if (refStart + lag + winD > micD.size()) break;
             double c = rigdsp::ncc(refD, refStart, micD, refStart + lag, winD);
             if (c > bestCorr) { bestCorr = c; bestLag = lag; }

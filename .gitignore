@@ -18,3 +18,19 @@ experiments/assets/
 
 # OS
 .DS_Store
+
+# rig working files (regenerated every run) + the driver's persistent browser profile
+rig/rec.wav
+experiments/.rig-profile/
+
+# LaTeX build artifacts (experiments/report)
+*.aux
+*.log
+*.out
+*.fls
+*.fdb_latexmk
+*.nav
+*.snm
+*.toc
+
+experiments/report/
