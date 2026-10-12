@@ -1,5 +1,7 @@
 # PROX-VOICE
 
+> **Archived:** This repository preserves the PROX-VOICE code and experimental data. Further development continues in the [EarShot repository](https://github.com/khan-u/EarShot).
+
 **"PROX-VOICE: A Proximity-Driven WebRTC Voice Mesh for Wireless Sensor Network Emulation in Browser-Based Virtual Environments"**.
 
 PROX-VOICE treats a browser-based virtual world as a mobile ad-hoc network (MANET). Each client maintains direct peer-to-peer WebRTC audio links only to the neighbours within its proximity radius, forming a leaderless, self-organising voice mesh without a central media server. This repository contains the full implementation, the acoustic loopback measurement rig, the experiment harnesses, the raw telemetry collected during the measurement study, and the acoustic rig captures behind the calibrated-latency result.
